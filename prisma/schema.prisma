@@ -1,0 +1,649 @@
+// =============================================================================
+// Rohan Construction — database schema
+//
+// Accounting principles enforced by this schema (see docs/02-database-and-accounting.md):
+//   * Every financial record belongs to exactly one Project.
+//   * Cash moves ONLY through five tables: ClientPayment (in), SupplierPayment,
+//     ContractorPayment, Expense, PartnerWithdrawal (out). The SQL view
+//     "ProjectCashLedger" unions them; it is the single source of truth for cash.
+//   * Commitments (Contract.contractAmount, PurchaseOrder lines) never move cash.
+//   * Material cost is recognised when goods are RECEIVED (MaterialReceiptLine),
+//     never again on payment or consumption.
+//   * Financial rows are never hard-deleted: they are voided (voidedAt + reason).
+//     A database trigger blocks DELETE on these tables.
+//   * Database triggers require an active ADMIN user (session variable
+//     app.user_id) for every write to business tables and write the AuditLog.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  VIEWER
+}
+
+enum ProjectType {
+  WITH_MATERIAL // we buy material + hire labour/contractors
+  LABOUR_RATE // client buys material, we provide labour at agreed rates
+  COMMISSION // we manage; charge commissionPercent on total project cost
+}
+
+enum ProjectStatus {
+  PLANNING
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+}
+
+enum ContractStatus {
+  ACTIVE
+  COMPLETED
+  TERMINATED
+}
+
+enum ContractorPaymentType {
+  ADVANCE
+  INSTALLMENT
+  FINAL
+}
+
+enum ContractAdjustmentType {
+  EXTRA // increases the amount payable to the contractor
+  DEDUCTION // decreases the amount payable to the contractor
+}
+
+enum PurchaseOrderStatus {
+  OPEN
+  CLOSED // no further deliveries expected (undelivered value is released)
+  CANCELLED
+}
+
+enum SupplierPaymentType {
+  ADVANCE // paid before material is received
+  PAYMENT // paid against material already received
+}
+
+enum StockMovementType {
+  ISSUE // issued / consumed at site
+  WASTAGE // lost, broken, wasted
+  ADJUSTMENT // stock-count correction (signed quantity)
+}
+
+// -----------------------------------------------------------------------------
+// Users, sessions, partners, audit
+// -----------------------------------------------------------------------------
+
+model User {
+  id                 String    @id @default(cuid())
+  name               String
+  username           String    @unique
+  email              String?
+  passwordHash       String
+  role               Role      @default(VIEWER)
+  isActive           Boolean   @default(true)
+  failedLoginCount   Int       @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  passwordChangedAt  DateTime  @default(now())
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  sessions Session[]
+  partner  Partner?
+  auditLogs AuditLog[]
+}
+
+model Session {
+  // id is the SHA-256 hash of the random token stored in the cookie;
+  // the raw token is never stored.
+  id         String   @id
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  lastSeenAt DateTime @default(now())
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String // INSERT | UPDATE | DELETE | LOGIN | LOGIN_FAILED | LOGOUT | USER_* ...
+  entityType String
+  entityId   String?
+  before     Json?
+  after      Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Partner {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  userId    String?  @unique
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  withdrawals PartnerWithdrawal[]
+}
+
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// -----------------------------------------------------------------------------
+// Configurable categories (each kind is its own table so foreign keys can
+// never point at the wrong kind of category)
+// -----------------------------------------------------------------------------
+
+model ExpenseCategory {
+  id              String   @id @default(cuid())
+  name            String   @unique
+  // System categories are maintained by the application, e.g. CONTRACTOR_PAYMENT
+  // rows are produced from ContractorPayment, never typed in manually.
+  systemKey       String?  @unique
+  isMiscellaneous Boolean  @default(false)
+  isActive        Boolean  @default(true)
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  expenses Expense[]
+}
+
+model MaterialCategory {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  materials Material[]
+}
+
+model WorkCategory {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  scopeItems ContractScopeItem[]
+}
+
+model SupplierCategory {
+  id        String     @id @default(cuid())
+  name      String     @unique
+  isActive  Boolean    @default(true)
+  sortOrder Int        @default(0)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  suppliers Supplier[]
+}
+
+// -----------------------------------------------------------------------------
+// Attachments (files stored on local VPS disk, metadata here)
+// -----------------------------------------------------------------------------
+
+model Attachment {
+  id           String   @id @default(cuid())
+  storedName   String   @unique // random name on disk, never user-controlled
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+  sha256       String
+  uploadedById String
+  createdAt    DateTime @default(now())
+
+  clientPayments     ClientPayment[]
+  contractorPayments ContractorPayment[]
+  supplierPayments   SupplierPayment[]
+  materialReceipts   MaterialReceipt[]
+  expenses           Expense[]
+}
+
+// -----------------------------------------------------------------------------
+// Clients & projects
+// -----------------------------------------------------------------------------
+
+model Client {
+  id         String    @id @default(cuid())
+  name       String
+  phone      String
+  email      String?
+  address    String?
+  notes      String?
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  projects Project[]
+
+  @@index([name])
+}
+
+model Project {
+  id                     String        @id @default(cuid())
+  name                   String        @unique
+  clientId               String
+  client                 Client        @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  siteAddress            String
+  type                   ProjectType
+  status                 ProjectStatus @default(ACTIVE)
+  startDate              DateTime      @db.Date
+  expectedCompletionDate DateTime?     @db.Date
+  description            String?
+  // Required (and only allowed) for COMMISSION projects. 0 < x <= 100.
+  commissionPercent      Decimal?      @db.Decimal(5, 2)
+  // Optional agreed value with the client (WITH_MATERIAL / LABOUR_RATE),
+  // used to show what the client still owes.
+  clientContractAmount   Decimal?      @db.Decimal(14, 2)
+  archivedAt             DateTime?
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  clientPayments     ClientPayment[]
+  contracts          Contract[]
+  contractorPayments ContractorPayment[]
+  purchaseOrders     PurchaseOrder[]
+  materialReceipts   MaterialReceipt[]
+  supplierPayments   SupplierPayment[]
+  stockMovements     StockMovement[]
+  expenses           Expense[]
+  partnerWithdrawals PartnerWithdrawal[]
+
+  @@index([clientId])
+  @@index([status])
+}
+
+model ClientPayment {
+  id           String        @id @default(cuid())
+  projectId    String
+  project      Project       @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  amount       Decimal       @db.Decimal(14, 2)
+  date         DateTime      @db.Date
+  method       PaymentMethod
+  reference    String?
+  description  String?
+  attachmentId String?
+  attachment   Attachment?   @relation(fields: [attachmentId], references: [id], onDelete: SetNull)
+  createdById  String
+  updatedById  String?
+  voidedAt     DateTime?
+  voidedById   String?
+  voidReason   String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([projectId, date])
+}
+
+// -----------------------------------------------------------------------------
+// Contractors
+// -----------------------------------------------------------------------------
+
+model Contractor {
+  id             String    @id @default(cuid())
+  name           String
+  phone          String
+  address        String?
+  specialization String?
+  notes          String?
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  contracts Contract[]
+
+  @@index([name])
+}
+
+model Contract {
+  id              String         @id @default(cuid())
+  projectId       String
+  project         Project        @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  contractorId    String
+  contractor      Contractor     @relation(fields: [contractorId], references: [id], onDelete: Restrict)
+  title           String
+  description     String?
+  // A commitment — NOT a cash movement and NOT an expense.
+  contractAmount  Decimal        @db.Decimal(14, 2)
+  startDate       DateTime       @db.Date
+  endDate         DateTime?      @db.Date
+  status          ContractStatus @default(ACTIVE)
+  progressPercent Int            @default(0)
+  createdById     String
+  updatedById     String?
+  voidedAt        DateTime?
+  voidedById      String?
+  voidReason      String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  scopeItems  ContractScopeItem[]
+  adjustments ContractAdjustment[]
+  payments    ContractorPayment[]
+
+  // Lets ContractorPayment reference (id, projectId) so a payment can never be
+  // booked to a different project than its contract.
+  @@unique([id, projectId])
+  @@index([projectId])
+  @@index([contractorId])
+}
+
+model ContractScopeItem {
+  id             String       @id @default(cuid())
+  contractId     String
+  contract       Contract     @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  workCategoryId String
+  workCategory   WorkCategory @relation(fields: [workCategoryId], references: [id], onDelete: Restrict)
+  included       Boolean // true = included in contract, false = explicitly excluded
+  notes          String?
+
+  @@unique([contractId, workCategoryId])
+}
+
+model ContractAdjustment {
+  id          String                 @id @default(cuid())
+  contractId  String
+  contract    Contract               @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  type        ContractAdjustmentType
+  amount      Decimal                @db.Decimal(14, 2)
+  date        DateTime               @db.Date
+  reason      String
+  createdById String
+  updatedById String?
+  voidedAt    DateTime?
+  voidedById  String?
+  voidReason  String?
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+
+  @@index([contractId])
+}
+
+model ContractorPayment {
+  id           String                @id @default(cuid())
+  contractId   String
+  projectId    String
+  contract     Contract              @relation(fields: [contractId, projectId], references: [id, projectId], onDelete: Restrict)
+  project      Project               @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  type         ContractorPaymentType
+  amount       Decimal               @db.Decimal(14, 2)
+  date         DateTime              @db.Date
+  method       PaymentMethod
+  reference    String?
+  description  String?
+  attachmentId String?
+  attachment   Attachment?           @relation(fields: [attachmentId], references: [id], onDelete: SetNull)
+  createdById  String
+  updatedById  String?
+  voidedAt     DateTime?
+  voidedById   String?
+  voidReason   String?
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+
+  @@index([projectId, date])
+  @@index([contractId])
+}
+
+// -----------------------------------------------------------------------------
+// Suppliers, purchase orders, receipts, inventory
+// -----------------------------------------------------------------------------
+
+model Supplier {
+  id         String             @id @default(cuid())
+  name       String
+  phone      String
+  address    String?
+  notes      String?
+  archivedAt DateTime?
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+
+  categories       SupplierCategory[]
+  purchaseOrders   PurchaseOrder[]
+  materialReceipts MaterialReceipt[]
+  payments         SupplierPayment[]
+
+  @@index([name])
+}
+
+model Material {
+  id         String           @id @default(cuid())
+  name       String
+  categoryId String
+  category   MaterialCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  unit       String // bag, ton, cft, piece, sq.ft, kg ...
+  isActive   Boolean          @default(true)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  poLines        PurchaseOrderLine[]
+  receiptLines   MaterialReceiptLine[]
+  stockMovements StockMovement[]
+
+  @@unique([name, unit])
+}
+
+model PurchaseOrder {
+  id           String              @id @default(cuid())
+  orderNumber  Int                 @unique @default(autoincrement())
+  projectId    String
+  project      Project             @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  supplierId   String
+  supplier     Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  orderDate    DateTime            @db.Date
+  expectedDate DateTime?           @db.Date
+  status       PurchaseOrderStatus @default(OPEN)
+  notes        String?
+  createdById  String
+  updatedById  String?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  lines    PurchaseOrderLine[]
+  receipts MaterialReceipt[]
+  payments SupplierPayment[]
+
+  @@index([projectId])
+  @@index([supplierId])
+}
+
+model PurchaseOrderLine {
+  id              String          @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  materialId      String
+  material        Material        @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  quantity        Decimal         @db.Decimal(14, 3)
+  rate            Decimal         @db.Decimal(14, 2)
+
+  receiptLines MaterialReceiptLine[]
+
+  @@index([purchaseOrderId])
+}
+
+// Goods received note. Receiving material is what (a) adds stock and
+// (b) recognises material cost and the supplier liability.
+model MaterialReceipt {
+  id              String         @id @default(cuid())
+  projectId       String
+  project         Project        @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  supplierId      String
+  supplier        Supplier       @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  purchaseOrderId String?
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  receiptDate     DateTime       @db.Date
+  challanNumber   String?
+  notes           String?
+  attachmentId    String?
+  attachment      Attachment?    @relation(fields: [attachmentId], references: [id], onDelete: SetNull)
+  createdById     String
+  updatedById     String?
+  voidedAt        DateTime?
+  voidedById      String?
+  voidReason      String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  lines MaterialReceiptLine[]
+
+  @@index([projectId, receiptDate])
+  @@index([supplierId])
+}
+
+model MaterialReceiptLine {
+  id         String             @id @default(cuid())
+  receiptId  String
+  receipt    MaterialReceipt    @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  materialId String
+  material   Material           @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  poLineId   String?
+  poLine     PurchaseOrderLine? @relation(fields: [poLineId], references: [id], onDelete: Restrict)
+  quantity   Decimal            @db.Decimal(14, 3)
+  rate       Decimal            @db.Decimal(14, 2)
+
+  @@index([receiptId])
+  @@index([materialId])
+}
+
+model SupplierPayment {
+  id              String              @id @default(cuid())
+  projectId       String
+  project         Project             @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  supplierId      String
+  supplier        Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  purchaseOrderId String?
+  purchaseOrder   PurchaseOrder?      @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  type            SupplierPaymentType
+  amount          Decimal             @db.Decimal(14, 2)
+  date            DateTime            @db.Date
+  method          PaymentMethod
+  reference       String?
+  description     String?
+  attachmentId    String?
+  attachment      Attachment?         @relation(fields: [attachmentId], references: [id], onDelete: SetNull)
+  createdById     String
+  updatedById     String?
+  voidedAt        DateTime?
+  voidedById      String?
+  voidReason      String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([projectId, date])
+  @@index([supplierId])
+}
+
+// Stock leaving the site's stock (issue/wastage) or count corrections.
+// Stock IN is never recorded here — it comes from MaterialReceiptLine.
+model StockMovement {
+  id          String            @id @default(cuid())
+  projectId   String
+  project     Project           @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  materialId  String
+  material    Material          @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  type        StockMovementType
+  // ISSUE / WASTAGE: positive quantity leaving stock.
+  // ADJUSTMENT: signed (+ found / - missing).
+  quantity    Decimal           @db.Decimal(14, 3)
+  date        DateTime          @db.Date
+  notes       String?
+  createdById String
+  updatedById String?
+  voidedAt    DateTime?
+  voidedById  String?
+  voidReason  String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([projectId, materialId])
+}
+
+// -----------------------------------------------------------------------------
+// Expenses & partner withdrawals
+// -----------------------------------------------------------------------------
+
+model Expense {
+  id           String          @id @default(cuid())
+  projectId    String
+  project      Project         @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  categoryId   String
+  category     ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  amount       Decimal         @db.Decimal(14, 2)
+  date         DateTime        @db.Date
+  paidTo       String
+  method       PaymentMethod
+  description  String?
+  attachmentId String?
+  attachment   Attachment?     @relation(fields: [attachmentId], references: [id], onDelete: SetNull)
+  createdById  String
+  updatedById  String?
+  voidedAt     DateTime?
+  voidedById   String?
+  voidReason   String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@index([projectId, date])
+  @@index([categoryId])
+}
+
+// Partner drawings: reduce site cash, are NOT construction expenses.
+model PartnerWithdrawal {
+  id          String        @id @default(cuid())
+  partnerId   String
+  partner     Partner       @relation(fields: [partnerId], references: [id], onDelete: Restrict)
+  projectId   String
+  project     Project       @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  amount      Decimal       @db.Decimal(14, 2)
+  date        DateTime      @db.Date
+  method      PaymentMethod
+  description String?
+  createdById String
+  updatedById String?
+  voidedAt    DateTime?
+  voidedById  String?
+  voidReason  String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([projectId, date])
+  @@index([partnerId])
+}

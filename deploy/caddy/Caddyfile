@@ -1,0 +1,26 @@
+# SITE_ADDRESS (from .env.production) decides how the site is served:
+#   :80                 plain HTTP on the VPS IP — initial setup/testing ONLY, no real data
+#   https://<VPS-IP>    HTTPS with Caddy's internal (self-signed) certificate
+#   erp.example.com     a real domain — Caddy obtains a Let's Encrypt certificate automatically
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# Uploads (bills/receipts) up to 12 MB.
+	request_body {
+		max_size 12MB
+	}
+
+	reverse_proxy app:3000 {
+		header_up X-Real-IP {remote_host}
+	}
+
+	# CADDY_TLS: "internal" for an IP address (self-signed),
+	#            your email address for a real domain (Let's Encrypt).
+	#            Ignored when SITE_ADDRESS is :80.
+	tls {$CADDY_TLS:internal}
+}
