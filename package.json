@@ -18,7 +18,8 @@
     "db:grants": "prisma db execute --file prisma/sql/grants.sql --schema prisma/schema.prisma",
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "e2e": "node e2e/smoke.cjs"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

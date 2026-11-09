@@ -13,6 +13,7 @@ Tailwind CSS, Docker Compose and Caddy.
 | [docs/04-open-decisions.md](docs/04-open-decisions.md) | **Decisions needed from the business** |
 | [docs/05-deployment.md](docs/05-deployment.md) | VPS hardening, Docker, HTTPS, backups and restore |
 | [docs/phase-1.md](docs/phase-1.md) | What Phase 1 delivers, how to set it up and test it |
+| [docs/phase-2.md](docs/phase-2.md) | Phase 2: projects, clients, client payments |
 
 ## Quick start (development)
 ```bash
@@ -28,6 +29,7 @@ npm run dev
 |---|---|
 | `npm run dev` / `build` / `start` | Run / build the app |
 | `npm test` | Integration tests (uses the `rohan_test` database) |
+| `npm run e2e` | Browser smoke test against a running dev server (see docs/phase-2.md) |
 | `npm run typecheck`, `npm run lint` | Static checks |
 | `npm run db:migrate` | Create a new migration (development) |
 | `npm run db:deploy` | Apply migrations + read-only grants (production) |
