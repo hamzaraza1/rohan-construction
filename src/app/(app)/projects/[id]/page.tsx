@@ -21,6 +21,15 @@ import { ArchiveButton } from "@/components/domain/ArchiveButton";
 import { ClientPaymentsTable } from "@/components/domain/ClientPaymentsTable";
 import { ContractsTable } from "@/components/domain/ContractsTable";
 import { listContractsForProject } from "@/lib/queries/contractors";
+import { listPurchaseOrders, listReceipts, listSupplierPayments, supplierAccounts, sumAccounts } from "@/lib/queries/suppliers";
+import { getProjectStock, listStockMovements } from "@/lib/queries/inventory";
+import { createStockMovement, voidStockMovement } from "@/lib/actions/inventory";
+import { PurchaseOrdersTable, ReceiptsTable, SupplierAccountsTable, SupplierPaymentsTable } from "@/components/domain/SupplyTables";
+import { StockMovementForm } from "@/components/domain/StockMovementForm";
+import { VoidDialog } from "@/components/domain/VoidDialog";
+import { formatNumber } from "@/lib/format";
+import { todayPk } from "@/lib/validation";
+import { Truck, FileText } from "lucide-react";
 
 type Params = { params: Promise<{ id: string }>; searchParams: Promise<Record<string, string | undefined>> };
 
@@ -34,7 +43,8 @@ export default async function ProjectPage({ params, searchParams }: Params) {
   const isAdmin = user.role === "ADMIN";
   const { id } = await params;
   const sp = await searchParams;
-  const tab = sp.tab === "payments" || sp.tab === "ledger" || sp.tab === "contracts" ? sp.tab : "overview";
+  const TABS = ["payments", "contracts", "suppliers", "inventory", "ledger"] as const;
+  const tab = (TABS as readonly string[]).includes(sp.tab ?? "") ? (sp.tab as (typeof TABS)[number]) : "overview";
 
   const [project, summary, paymentCount] = await Promise.all([
     getProject(id),
@@ -82,6 +92,8 @@ export default async function ProjectPage({ params, searchParams }: Params) {
           { key: "overview", label: "Dashboard", href: base },
           { key: "payments", label: "Client payments", href: `${base}?tab=payments`, count: paymentCount },
           { key: "contracts", label: "Contractors", href: `${base}?tab=contracts` },
+          { key: "suppliers", label: "Suppliers", href: `${base}?tab=suppliers` },
+          { key: "inventory", label: "Inventory", href: `${base}?tab=inventory` },
           { key: "ledger", label: "Cash ledger", href: `${base}?tab=ledger` },
         ]}
       />
@@ -89,6 +101,8 @@ export default async function ProjectPage({ params, searchParams }: Params) {
         {tab === "overview" && <Overview projectId={id} summary={summary} description={project.description} />}
         {tab === "payments" && <Payments projectId={id} isAdmin={isAdmin} archived={Boolean(project.archivedAt)} />}
         {tab === "contracts" && <Contracts projectId={id} isAdmin={isAdmin} archived={Boolean(project.archivedAt)} />}
+        {tab === "suppliers" && <Suppliers projectId={id} isAdmin={isAdmin} archived={Boolean(project.archivedAt)} />}
+        {tab === "inventory" && <Inventory projectId={id} isAdmin={isAdmin} archived={Boolean(project.archivedAt)} />}
         {tab === "ledger" && <Ledger projectId={id} from={sp.from} to={sp.to} />}
       </div>
     </>
@@ -207,7 +221,7 @@ async function Overview({ projectId, summary: s, description }: { projectId: str
             {stock.receivedValue.isZero() ? (
               <div className="flex items-start gap-3 text-sm text-slate-600">
                 <Boxes className="size-5 shrink-0 text-slate-400" />
-                No material received on this site yet. Receiving and stock screens arrive in Phase 4.
+                No material received on this site yet. Material is received from the Suppliers tab.
               </div>
             ) : (
               <dl className="space-y-2 text-sm">
@@ -216,6 +230,9 @@ async function Overview({ projectId, summary: s, description }: { projectId: str
                 <div className="flex justify-between"><dt className="text-slate-600">Total received</dt><dd className="tabular font-medium">{formatMoney(stock.receivedValue)}</dd></div>
               </dl>
             )}
+          </div>
+          <div className="border-t border-slate-100 px-5 py-3 text-sm">
+            <Link href={`/projects/${projectId}?tab=inventory`} className="font-medium text-brand-700 hover:underline">View site stock →</Link>
           </div>
           {description && (
             <div className="border-t border-slate-100 p-5">
@@ -303,6 +320,171 @@ async function Contracts({ projectId, isAdmin, archived }: { projectId: string; 
           <ContractsTable contracts={contracts} balances={balances} show="contractor" />
         )}
       </Card>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+
+async function Suppliers({ projectId, isAdmin, archived }: { projectId: string; isAdmin: boolean; archived: boolean }) {
+  const [accounts, orders, receipts, payments] = await Promise.all([
+    supplierAccounts({ projectId }),
+    listPurchaseOrders({ projectId }),
+    listReceipts({ projectId }),
+    listSupplierPayments({ projectId }),
+  ]);
+  const names = new Map([...orders.map((o) => [o.supplierId, o.supplier.name] as const), ...receipts.map((r) => [r.supplierId, r.supplier.name] as const), ...payments.map((p) => [p.supplierId, p.supplier.name] as const)]);
+  const t = sumAccounts(accounts);
+  const canWrite = isAdmin && !archived;
+  return (
+    <div className="space-y-6">
+      {canWrite && (
+        <div className="flex flex-wrap gap-2">
+          <ButtonLink href={`/purchase-orders/new?projectId=${projectId}`} variant="secondary"><FileText className="size-4" /> New purchase order</ButtonLink>
+          <ButtonLink href={`/receipts/new?projectId=${projectId}`} variant="secondary"><Truck className="size-4" /> Receive material (no order)</ButtonLink>
+          <ButtonLink href={`/supplier-payments/new?projectId=${projectId}`} variant="secondary"><Plus className="size-4" /> Pay supplier / advance</ButtonLink>
+        </div>
+      )}
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <StatCard label="Total orders" value={formatMoney(t.orderedValue)} hint="Commitments (not cash)" />
+        <StatCard label="Material received" value={formatMoney(t.receivedValue)} hint="Project cost" />
+        <StatCard label="Paid to suppliers" value={formatMoney(t.paid)} hint="Cash out (advances + payments)" />
+        <StatCard label="Advance balance" value={formatMoney(t.advanceBalance)} hint="Paid, material not yet received" />
+        <StatCard label="Outstanding payable" value={formatMoney(t.outstandingPayable)} tone={t.outstandingPayable.isZero() ? "default" : "warning"} hint="Received, not yet paid" />
+        <StatCard label="Undelivered orders" value={formatMoney(t.undeliveredValue)} />
+      </div>
+      <Card>
+        <CardHeader title="Supplier accounts" description="Balances are calculated per supplier for this project only." />
+        {accounts.length === 0 ? (
+          <EmptyState title="No supplier transactions on this project yet" />
+        ) : (
+          <SupplierAccountsTable
+            label="Supplier"
+            rows={accounts.map((a) => ({ ...a, key: a.supplierId, name: names.get(a.supplierId) ?? "Supplier", href: `/suppliers/${a.supplierId}` }))}
+          />
+        )}
+      </Card>
+      {orders.length > 0 && (
+        <Card>
+          <CardHeader title="Purchase orders" />
+          <PurchaseOrdersTable orders={orders} show="supplier" />
+        </Card>
+      )}
+      {receipts.length > 0 && (
+        <Card>
+          <CardHeader title="Material received" />
+          <ReceiptsTable receipts={receipts} show="supplier" />
+        </Card>
+      )}
+      {payments.length > 0 && (
+        <Card>
+          <CardHeader title="Supplier payments" />
+          <SupplierPaymentsTable payments={payments} isAdmin={canWrite} show="supplier" />
+        </Card>
+      )}
+    </div>
+  );
+}
+
+async function Inventory({ projectId, isAdmin, archived }: { projectId: string; isAdmin: boolean; archived: boolean }) {
+  const [stock, movements] = await Promise.all([getProjectStock(projectId), listStockMovements(projectId)]);
+  const value = stock.reduce((a, s) => a.plus(s.stockValue), new Prisma.Decimal(0));
+  const canWrite = isAdmin && !archived;
+  const MOVE = { ISSUE: "Issued", WASTAGE: "Wastage", ADJUSTMENT: "Correction" } as const;
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader
+          title="Site stock"
+          description={`Stock value ${formatMoney(value)} (remaining quantity × average received rate). Stock comes in only through material receipts.`}
+        />
+        {stock.length === 0 ? (
+          <EmptyState title="No materials ordered or received on this site yet" />
+        ) : (
+          <Table>
+            <THead>
+              <tr>
+                <TH>Material</TH>
+                <TH numeric>Purchased (ordered)</TH>
+                <TH numeric>Received</TH>
+                <TH numeric>Issued / used</TH>
+                <TH numeric>Wastage</TH>
+                <TH numeric>Corrections</TH>
+                <TH numeric>In stock</TH>
+                <TH numeric>Avg rate</TH>
+                <TH numeric>Stock value</TH>
+              </tr>
+            </THead>
+            <TBody>
+              {stock.map((s) => (
+                <TR key={s.materialId}>
+                  <TD><div className="font-medium">{s.materialName}</div><div className="text-xs text-slate-500">{s.categoryName}</div></TD>
+                  <TD numeric>{formatNumber(s.orderedQty)}</TD>
+                  <TD numeric>{formatNumber(s.receivedQty)}</TD>
+                  <TD numeric>{formatNumber(s.issuedQty)}</TD>
+                  <TD numeric>{formatNumber(s.wastedQty)}</TD>
+                  <TD numeric>{s.adjustedQty.isZero() ? "—" : formatNumber(s.adjustedQty)}</TD>
+                  <TD numeric className="font-semibold">{formatNumber(s.onHandQty)} {s.unit}</TD>
+                  <TD numeric>{formatMoney(s.avgRate)}</TD>
+                  <TD numeric>{formatMoney(s.stockValue)}</TD>
+                </TR>
+              ))}
+            </TBody>
+          </Table>
+        )}
+      </Card>
+      {canWrite && stock.some((s) => s.receivedQty.greaterThan(0)) && (
+        <Card>
+          <CardHeader title="Record stock usage" description="Issue to work, wastage, or a correction after a physical count. Stock can never go below zero." />
+          <StockMovementForm
+            action={createStockMovement.bind(null, projectId)}
+            today={todayPk()}
+            materials={stock.filter((s) => s.receivedQty.greaterThan(0)).map((s) => ({ id: s.materialId, name: s.materialName, unit: s.unit, onHand: formatNumber(s.onHandQty) }))}
+          />
+        </Card>
+      )}
+      {movements.length > 0 && (
+        <Card>
+          <CardHeader title="Stock usage history" />
+          <Table>
+            <THead>
+              <tr>
+                <TH>Date</TH>
+                <TH>Entry</TH>
+                <TH>Material</TH>
+                <TH numeric>Quantity</TH>
+                <TH>Notes</TH>
+                <TH className="w-px"><span className="sr-only">Actions</span></TH>
+              </tr>
+            </THead>
+            <TBody>
+              {movements.map((m) => {
+                const v = Boolean(m.voidedAt);
+                return (
+                  <TR key={m.id} className={v ? "text-slate-400" : undefined}>
+                    <TD className={v ? "text-slate-400" : undefined}>{formatDate(m.date)}</TD>
+                    <TD>{v ? <Badge tone="red">Voided</Badge> : <Badge tone={m.type === "WASTAGE" ? "amber" : m.type === "ADJUSTMENT" ? "violet" : "slate"}>{MOVE[m.type]}</Badge>}</TD>
+                    <TD className={v ? "text-slate-400" : undefined}>{m.material.name}</TD>
+                    <TD numeric className={v ? "line-through" : undefined}>
+                      {m.type === "ADJUSTMENT" && m.quantity.greaterThan(0) ? "+" : m.type === "ADJUSTMENT" ? "" : "−"}{formatNumber(m.quantity)} {m.material.unit}
+                    </TD>
+                    <TD className="max-w-xs whitespace-normal text-slate-500">{v ? m.voidReason : m.notes}</TD>
+                    <TD>
+                      {canWrite && !v && (
+                        <VoidDialog
+                          action={voidStockMovement.bind(null, m.id)}
+                          title="Void this stock entry?"
+                          description="The quantity goes back into (or out of) stock. Not allowed if that would make stock negative."
+                        />
+                      )}
+                    </TD>
+                  </TR>
+                );
+              })}
+            </TBody>
+          </Table>
+        </Card>
+      )}
     </div>
   );
 }

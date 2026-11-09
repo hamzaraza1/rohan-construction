@@ -85,3 +85,22 @@ export function formFields(fd: FormData): Record<string, string> {
   for (const [k, v] of fd.entries()) if (typeof v === "string") out[k] = v;
   return out;
 }
+
+const QTY_RE = /^\d{1,11}(\.\d{1,3})?$/;
+
+/** Quantity typed by a person ("1,000", "12.5"). Up to 3 decimals; returned as an exact string. */
+export const quantity = (opts: { signed?: boolean } = {}) =>
+  z
+    .string({ error: "Required" })
+    .transform((v) => v.replace(/[,\s]/g, ""))
+    .refine((v) => v !== "", "Required")
+    .refine((v) => QTY_RE.test(opts.signed ? v.replace(/^[-+]/, "") : v), "Enter a quantity like 100 or 12.5")
+    .refine((v) => Number(v) !== 0 && (opts.signed || Number(v) > 0), opts.signed ? "Cannot be zero" : "Must be greater than zero");
+
+/** Rate per unit; zero allowed (e.g. free samples). */
+export const rate = () =>
+  z
+    .string({ error: "Required" })
+    .transform((v) => v.replace(/rs\.?/i, "").replace(/[,\s]/g, ""))
+    .refine((v) => v !== "", "Required")
+    .refine((v) => MONEY_RE.test(v), "Enter a rate like 1250 or 99.50");
