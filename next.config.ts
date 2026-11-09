@@ -9,6 +9,8 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // Lets a second build (e.g. for testing) run without disturbing a running server.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   poweredByHeader: false,
   serverExternalPackages: ["@node-rs/argon2"],
   experimental: {

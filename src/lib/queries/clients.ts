@@ -22,7 +22,7 @@ export async function listClients(q?: string, archived = false) {
       const s = summaries.get(p.id);
       if (!s) continue;
       received = received.plus(s.clientReceipts);
-      if (s.clientAmountDue && s.clientAmountDue.isPositive()) due = due.plus(s.clientAmountDue);
+      if (s.clientAmountDue && s.clientAmountDue.greaterThan(0)) due = due.plus(s.clientAmountDue);
     }
     return {
       ...c,

@@ -14,6 +14,7 @@ Tailwind CSS, Docker Compose and Caddy.
 | [docs/05-deployment.md](docs/05-deployment.md) | VPS hardening, Docker, HTTPS, backups and restore |
 | [docs/phase-1.md](docs/phase-1.md) | What Phase 1 delivers, how to set it up and test it |
 | [docs/phase-2.md](docs/phase-2.md) | Phase 2: projects, clients, client payments |
+| [docs/phase-3.md](docs/phase-3.md) | Phase 3: contractors, contracts, scope, payments |
 
 ## Quick start (development)
 ```bash

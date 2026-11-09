@@ -34,7 +34,7 @@ export default async function ClientPage({ params }: Params) {
 
   const zero = new Prisma.Decimal(0);
   const received = client.projects.reduce((a, p) => a.plus(p.summary.clientReceipts), zero);
-  const due = client.projects.reduce((a, p) => (p.summary.clientAmountDue?.isPositive() ? a.plus(p.summary.clientAmountDue) : a), zero);
+  const due = client.projects.reduce((a, p) => (p.summary.clientAmountDue?.greaterThan(0) ? a.plus(p.summary.clientAmountDue) : a), zero);
   const billable = client.projects.reduce((a, p) => (p.summary.clientBillable ? a.plus(p.summary.clientBillable) : a), zero);
 
   return (

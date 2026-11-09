@@ -19,6 +19,8 @@ import { LinkTabs } from "@/components/ui/Tabs";
 import { ProjectStatusBadge, ProjectTypeBadge } from "@/components/domain/badges";
 import { ArchiveButton } from "@/components/domain/ArchiveButton";
 import { ClientPaymentsTable } from "@/components/domain/ClientPaymentsTable";
+import { ContractsTable } from "@/components/domain/ContractsTable";
+import { listContractsForProject } from "@/lib/queries/contractors";
 
 type Params = { params: Promise<{ id: string }>; searchParams: Promise<Record<string, string | undefined>> };
 
@@ -32,7 +34,7 @@ export default async function ProjectPage({ params, searchParams }: Params) {
   const isAdmin = user.role === "ADMIN";
   const { id } = await params;
   const sp = await searchParams;
-  const tab = sp.tab === "payments" || sp.tab === "ledger" ? sp.tab : "overview";
+  const tab = sp.tab === "payments" || sp.tab === "ledger" || sp.tab === "contracts" ? sp.tab : "overview";
 
   const [project, summary, paymentCount] = await Promise.all([
     getProject(id),
@@ -79,12 +81,14 @@ export default async function ProjectPage({ params, searchParams }: Params) {
         tabs={[
           { key: "overview", label: "Dashboard", href: base },
           { key: "payments", label: "Client payments", href: `${base}?tab=payments`, count: paymentCount },
+          { key: "contracts", label: "Contractors", href: `${base}?tab=contracts` },
           { key: "ledger", label: "Cash ledger", href: `${base}?tab=ledger` },
         ]}
       />
       <div className="mt-6">
         {tab === "overview" && <Overview projectId={id} summary={summary} description={project.description} />}
         {tab === "payments" && <Payments projectId={id} isAdmin={isAdmin} archived={Boolean(project.archivedAt)} />}
+        {tab === "contracts" && <Contracts projectId={id} isAdmin={isAdmin} archived={Boolean(project.archivedAt)} />}
         {tab === "ledger" && <Ledger projectId={id} from={sp.from} to={sp.to} />}
       </div>
     </>
@@ -269,6 +273,37 @@ async function Payments({ projectId, isAdmin, archived }: { projectId: string; i
         <ClientPaymentsTable payments={payments} isAdmin={isAdmin} />
       )}
     </Card>
+  );
+}
+
+// -----------------------------------------------------------------------------
+
+async function Contracts({ projectId, isAdmin, archived }: { projectId: string; isAdmin: boolean; archived: boolean }) {
+  const { contracts, balances, totals } = await listContractsForProject(projectId);
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-4 sm:grid-cols-3">
+        <StatCard label="Total contract commitments" value={formatMoney(totals.netPayable)} hint="Incl. extras and deductions — not cash" />
+        <StatCard label="Paid to contractors" value={formatMoney(totals.paid)} />
+        <StatCard label="Remaining payable" value={formatMoney(totals.outstanding)} tone={totals.outstanding.isZero() ? "default" : "warning"} />
+      </div>
+      <Card>
+        <CardHeader
+          title="Contractor contracts"
+          description="Each contract records its agreed amount, work scope, extras/deductions and payments."
+          actions={
+            isAdmin && !archived ? (
+              <ButtonLink href={`/contracts/new?projectId=${projectId}`} size="sm"><Plus className="size-4" /> New contract</ButtonLink>
+            ) : undefined
+          }
+        />
+        {contracts.length === 0 ? (
+          <EmptyState title="No contractor contracts on this project" />
+        ) : (
+          <ContractsTable contracts={contracts} balances={balances} show="contractor" />
+        )}
+      </Card>
+    </div>
   );
 }
 

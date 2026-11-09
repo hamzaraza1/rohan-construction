@@ -21,15 +21,21 @@ export function PaymentForm({
   maxDate,
   cancelHref,
   submitLabel,
+  leading,
+  trailing,
 }: {
   action: (prev: ActionResult | null, fd: FormData) => Promise<ActionResult>;
   initial: PaymentValues;
   maxDate: string;
   cancelHref: string;
   submitLabel: string;
+  /** Extra fields rendered before / after the standard payment fields. */
+  leading?: React.ReactNode;
+  trailing?: React.ReactNode;
 }) {
   return (
     <ActionForm action={action} className="grid gap-4 sm:grid-cols-2">
+      {leading}
       <FormField label="Amount (Rs.)" name="amount" required>
         <Input id="amount" name="amount" inputMode="decimal" defaultValue={initial.amount} required placeholder="e.g. 500000" autoComplete="off" />
       </FormField>
@@ -62,6 +68,7 @@ export function PaymentForm({
         )}
         <Input id="attachment" name="attachment" type="file" accept="application/pdf,image/jpeg,image/png,image/webp" className="file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1 file:text-sm" />
       </FormField>
+      {trailing}
       <div className="flex gap-2 sm:col-span-2">
         <SubmitButton>{submitLabel}</SubmitButton>
         <ButtonLink href={cancelHref} variant="secondary">Cancel</ButtonLink>

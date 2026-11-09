@@ -45,11 +45,14 @@ export function toActionError(err: unknown): ActionResult<never> {
     if (err.code === "P2025") return { ok: false, error: "Record not found." };
   }
   const message = err instanceof Error ? err.message : String(err);
-  // Messages raised by our own database triggers are safe and meaningful.
+  // Business rules raised by our own database triggers / CHECK constraints
+  // (SQLSTATE 23514 check_violation, 42501 insufficient_privilege) are safe to show.
+  const pg = message.match(/PostgresError \{ code: "(23514|42501)", message: "((?:[^"\\]|\\.)*)"/);
+  if (pg) return { ok: false, error: friendlyDbMessage(pg[2]) };
   const dbRule = message.match(
-    /(permission denied[^\n"]*|[^\n"]*cannot be deleted[^\n"]*|[^\n"]*cannot be modified[^\n"]*|insufficient stock[^\n"]*|[^\n"]*does not (?:belong|match)[^\n"]*|contract is voided)/,
+    /(permission denied[^\n"]*|[^\n"]*cannot be (?:deleted|modified|changed|moved)[^\n"]*|insufficient stock[^\n"]*|[^\n"]*does not (?:belong|match)[^\n"]*|contract is voided)/,
   );
-  if (dbRule) return { ok: false, error: dbRule[1].trim() };
+  if (dbRule) return { ok: false, error: friendlyDbMessage(dbRule[1].trim()) };
   console.error("[action error]", err);
   return { ok: false, error: "Something went wrong. Nothing was saved." };
 }
@@ -70,4 +73,14 @@ export async function writeAudit(
       ip: entry.ip ?? null,
     },
   });
+}
+
+/** Turns a raw database rule message into a sentence for the user. */
+export function friendlyDbMessage(raw: string): string {
+  const m = raw.trim();
+  if (/violates check constraint "(\w+)_amount_chk"/.test(m)) return "Amount must be greater than zero.";
+  if (/violates check constraint "Contract_progress_chk"/.test(m)) return "Progress must be between 0 and 100%.";
+  if (/violates check constraint/.test(m)) return "The values entered break a data rule. Please check them.";
+  if (/not an active admin|no acting user/.test(m)) return "You do not have permission to perform this action.";
+  return m.charAt(0).toUpperCase() + m.slice(1) + (/[.!?]$/.test(m) ? "" : ".");
 }
