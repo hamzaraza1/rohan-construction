@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Brand: deep site-navy with a safety-amber accent. */
+  --color-brand-50: #eef4fb;
+  --color-brand-100: #d6e3f4;
+  --color-brand-200: #b1c9e8;
+  --color-brand-500: #2f5d8f;
+  --color-brand-600: #244b76;
+  --color-brand-700: #1c3b5e;
+  --color-brand-800: #152c47;
+  --color-brand-900: #0f2238;
+  --color-brand-950: #0a1828;
+  --color-accent-50: #fff8eb;
+  --color-accent-100: #feecc7;
+  --color-accent-400: #f5b041;
+  --color-accent-500: #e59a1a;
+  --color-accent-600: #c47d0e;
+
+  /* Chart series (validated categorical order: blue, orange, aqua). */
+  --color-series-1: #2a78d6;
+  --color-series-2: #eb6834;
+  --color-series-3: #1baf7a;
+}
+
+@layer base {
+  html { -webkit-text-size-adjust: 100%; }
+  body { @apply bg-slate-100/70 text-slate-900 antialiased; }
+  .tabular { font-variant-numeric: tabular-nums; }
+}
+
+@media print {
+  .no-print { display: none !important; }
+  body { background: white; }
+}
